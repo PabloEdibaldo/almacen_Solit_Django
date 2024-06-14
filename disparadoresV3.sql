@@ -1,153 +1,118 @@
 DELIMITER //
 CREATE TRIGGER insertar_productos
-AFTER INSERT ON sistemasolit_pedido
+AFTER INSERT ON sistemaSolit_pedido
 FOR EACH ROW
 BEGIN
-    DECLARE registro_id VARCHAR(250);
-    SELECT id INTO registro_id FROM sistemasolit_productos WHERE nombre_producto = NEW.nombre;
-    IF registro_id IS NULL THEN
-        INSERT INTO sistemasolit_productos (id, nombre_producto, marca, modelo, stock, observaciones, fecha_ingreso, unidad_medida, empresa, proveedor, zona, stock_minimo)
-        VALUES (NEW.id, NEW.nombre, NULL, NULL, NEW.cantidad, NULL, CURRENT_DATE, NULL, NULL, NULL, NULL, NULL);
+    DECLARE productos_id INT;
+    DECLARE contador1 INT DEFAULT 0;
+    
+    -- Verifica si el producto ya existe
+    SELECT id INTO productos_id 
+    FROM sistemaSolit_productos 
+    WHERE modelo = NEW.modelo;
+
+    -- Si el producto no existe, inserta uno nuevo
+    IF productos_id IS NULL THEN
+        INSERT INTO sistemaSolit_productos (
+            nombre_producto, marca, modelo, stock, observaciones, fecha_ingreso, 
+            unidad_medida, empresa, proveedor, zona, stock_minimo, imgProducto, 
+            categoria, fecha_actualizacion, automatico_insert
+        ) VALUES (
+            NULL, NULL, NEW.modelo, NEW.cantidad, NEW.nombre, CURRENT_DATE(), 
+            NEW.unidad, NULL, NULL, NULL, NULL, NULL, NULL, CURRENT_DATE(), 1
+        );
     ELSE
-        UPDATE sistemasolit_productos SET stock = stock + NEW.cantidad WHERE nombre_producto = NEW.nombre;
+        -- Si el producto existe, actualiza el stock
+        UPDATE sistemaSolit_productos 
+        SET stock = stock + NEW.cantidad,
+            fecha_actualizacion = CURRENT_DATE()
+        WHERE id = productos_id;
+    END IF;
+    
+    -- Maneja las inserciones en la tabla de carretes
+    IF NEW.unidad = 'bobina' THEN
+        IF NEW.nombre LIKE '%cable utp%' OR NEW.nombre LIKE '%carrete%' THEN
+            WHILE contador1 < NEW.cantidad DO
+                INSERT INTO sistemaSolit_carretes (
+                    metraje_inicial, metraje_usado, id_producto_id, 
+                    id_usuario_id, luegarDeUso, descripcion
+                ) VALUES (
+                    0, 0, productos_id, NULL, NULL, NEW.nombre
+                );
+                SET contador1 = contador1 + 1;
+            END WHILE;
+        END IF;
+    ELSEIF NEW.unidad = 'kilometro' THEN
+        IF NEW.nombre LIKE '%kilometro%' THEN
+            INSERT INTO sistemaSolit_carretes (
+                metraje_inicial, metraje_usado, id_producto_id, 
+                id_usuario_id, luegarDeUso, descripcion
+            ) VALUES (
+                NEW.cantidad * 1000, 0, productos_id, NULL, NULL, NEW.nombre
+            );
+        END IF;
+    END IF;    
+END;
+//
+DELIMITER ;
+---------------------------------------------------------------------------------------------------
+DELIMITER //
+CREATE TRIGGER update_producto
+AFTER UPDATE ON sistemaSolit_productos
+FOR EACH ROW
+BEGIN
+    DECLARE contador INT DEFAULT 0;
+    DECLARE limite INT;
+
+    -- Obtén el nuevo stock del producto
+    SELECT stock INTO limite 
+    FROM sistemaSolit_productos 
+    WHERE id = NEW.id;
+
+    -- Inserta registros individuales basados en la diferencia de stock
+    WHILE contador < limite - OLD.stock DO
+        INSERT INTO sistemaSolit_productosindividuales (
+            nombre_producto_individual, status, id_producto_id
+        ) VALUES (
+            IFNULL(NEW.observaciones, 'Sin observaciones'), 1, NEW.id
+        );
+        SET contador = contador + 1;
+    END WHILE;
+END;
+//
+DELIMITER ;
+---------------------------------------------------------------------------------------------------
+DELIMITER //
+CREATE TRIGGER crear_producto_individual
+AFTER INSERT ON sistemaSolit_productos
+FOR EACH ROW
+BEGIN
+    DECLARE contador INT DEFAULT 0;
+
+    -- Inserta productos individuales basados en el valor de automatico_insert
+    IF NEW.automatico_insert = 1 THEN
+        WHILE contador < NEW.stock DO
+            INSERT INTO sistemaSolit_productosindividuales (
+                nombre_producto_individual, status, id_producto_id
+            ) VALUES (
+                IFNULL(NEW.observaciones, 'Sin observaciones'), 1, NEW.id
+            );
+            SET contador = contador + 1;
+        END WHILE;
+    ELSEIF NEW.automatico_insert = 0 THEN
+        WHILE contador < NEW.stock DO
+            INSERT INTO sistemaSolit_productosindividuales (
+                nombre_producto_individual, status, id_producto_id
+            ) VALUES (
+                IFNULL(NEW.nombre_producto, 'Producto sin nombre'), 1, NEW.id
+            );
+            SET contador = contador + 1;
+        END WHILE;
     END IF;
 END;
 //
 DELIMITER ;
--------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-CREATE TRIGGER insert_producto_individual
-AFTER INSERT ON sistemasolit_productos
-FOR EACH ROW
-BEGIN
-DECLARE contador INT DEFAULT 0;
-DECLARE limite INT;
-SELECT stock INTO limite FROM sistemasolit_productos WHERE id = NEW.id;
-WHILE contador < limite DO
-INSERT INTO sistemasolit_productosindividuales (id, nombre_producto_individual, status, id_producto_id)
-VALUES (NULL, NEW.nombre_producto, 1, NEW.id);
-SET contador = contador + 1;
-END WHILE;
-END //
-DELIMITER ;
--------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-CREATE TRIGGER update_producto
-AFTER UPDATE ON sistemasolit_productos
-FOR EACH ROW
-BEGIN
-DECLARE contador INT DEFAULT 0;
-DECLARE limite INT;
-SELECT stock INTO limite FROM sistemasolit_productos WHERE id = NEW.id;
-    WHILE contador < limite - OLD.stock DO
-    INSERT INTO sistemasolit_productosindividuales (id, nombre_producto_individual, status, id_producto_id)
-    VALUES (NULL, NEW.nombre_producto, 1, NEW.id);
-SET contador = contador + 1;
-END WHILE;
-END //
-DELIMITER ;
--------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-CREATE TRIGGER delete_merma
-AFTER DELETE ON sistemasolit_productosindividuales
-FOR EACH ROW
-BEGIN
-    UPDATE sistemasolit_productos SET stock =  stock -1 WHERE id = OLD.id_producto_id;
-END //
-DELIMITER ;
-
--------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-
-CREATE TRIGGER actualizar_stock
-AFTER UPDATE ON sistemasolit_reparto
-FOR EACH ROW
-BEGIN
-    DECLARE i INT DEFAULT 0;
-    DECLARE total_productos INT;
-    DECLARE producto_id VARCHAR(250);
-    DECLARE cantidad INT;
-
-    IF NEW.nombre_administrador IS NOT NULL THEN
-        SET total_productos = JSON_LENGTH(JSON_EXTRACT(NEW.producto_cantidad, '$.productos'));
-
-        WHILE i < total_productos DO
-            SET producto_id = JSON_UNQUOTE(JSON_EXTRACT(NEW.producto_cantidad, CONCAT('$.productos[', i, '].nombre_producto')));
-            SET cantidad = JSON_EXTRACT(NEW.producto_cantidad, CONCAT('$.productos[', i, '].cantidad'));
-
-
-            UPDATE sistemasolit_productos
-            SET stock = stock - cantidad
-            WHERE nombre_producto = producto_id;
-
-            SET i = i + 1;
-        END WHILE;
-    END IF;
-END //
-
-DELIMITER ;
-----------------------------------------------------------------------------------------------------------------------------
-
-DELIMITER //
-
-CREATE TRIGGER insert_stock_minimo
-AFTER UPDATE ON sistemasolit_productos
-FOR EACH ROW
-BEGIN
-    DECLARE limite INT;
-    SELECT stock_minimo INTO limite FROM sistemasolit_productos WHERE id=NEW.id ;
-
-    IF NEW.stock <= limite AND limite IS NOT NULL THEN
-        INSERT INTO sistemasolit_alerta (id, nombre_producto, stock_actual)
-        VALUES(NULL, NEW.nombre_producto, NEW.stock);
-    END IF;
-END
-//
-DELIMITER ;
-----------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-
-CREATE TRIGGER eliminar_alerta
-AFTER UPDATE ON sistemasolit_productos
-FOR EACH ROW
-BEGIN
-    DECLARE limite INT;
-    DECLARE inicio INT;
-    SELECT stock_minimo INTO limite FROM sistemasolit_productos WHERE id = NEW.id;
-    SELECT stock INTO inicio FROM sistemasolit_productos WHERE id = NEW.id;
-    IF inicio > limite AND limite IS NOT NULL THEN
-        DELETE FROM sistemasolit_alerta WHERE nombre_producto = NEW.nombre_producto;
-    END IF;
-END //
-
-DELIMITER ;
-----------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-
-CREATE TRIGGER insert_carretes
-AFTER INSERT ON sistemasolit_productosindividuales
-FOR EACH ROW
-BEGIN
-    IF NEW.nombre_producto_individual LIKE '%carrete%' THEN
-    INSERT INTO sistemasolit_carretes (id, metraje_inicial, metraje_usado, id_producto_individual_id, id_usuario_id)
-    VALUES(NULL, 0, 0, NEW.id, NULL);
-    END IF;
-    END //
-DELIMITER ;
-----------------------------------------------------------------------------------------------------------------------------
-DELIMITER //
-
-CREATE TRIGGER delete_alertas
-AFTER DELETE ON sistemasolit_productos
-FOR EACH ROW
-BEGIN
-    DELETE FROM sistemasolit_alerta WHERE nombre_producto = OLD.nombre_producto;
-END //
-
-DELIMITER ;
-
-
-
+---------------------------------------------------------------------------------------------------
 
 
 
